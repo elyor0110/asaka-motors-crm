@@ -25,21 +25,28 @@ except Exception as e:
     st.error(f"Google Sheets bilan bog'lanishda xatolik yuz berdi. Iltimos Secrets sozlamalarini tekshiring: {e}")
     st.stop()
 
-# Ustunlar nomlari
+# Ustunlar nomlari (Standart apostrof bilan)
 COLS_SHARTNOMALAR = ["Shartnoma ID", "Yetkazib beruvchi", "Sana", "Jami Summa", "Status"]
 COLS_KOMPLEKTLAR = ["Konteyner / Partiya ID", "Shartnoma ID", "Model", "Optsiya", "Komplektlar Soni", "Hozirgi Joylashuv", "ETA (Kelish sanasi)", "Kritik Holat"]
 COLS_ISHLAB_CHIQARISH = ["Liniya ID", "Konteyner / Partiya ID", "Model", "Optsiya", "Yig'ilayotgan Soni", "Liniyaga Chiqqan Sana", "Tayyor Bo'lgan Soni", "Tayyor Bo'lgan Sana"]
 
-# Ma'lumotlarni yuklash funksiyasi
+# Ma'lumotlarni yuklash funksiyasi (Apostroflarni avtomatik tekislovchi)
 def load_data(sheet_name, expected_cols):
     try:
         worksheet = sh.worksheet(sheet_name)
         data = worksheet.get_all_records()
+        norm_expected = [c.replace("ʻ", "'").replace("’", "'").replace("`", "'") for c in expected_cols]
+        
         if not data:
-            return pd.DataFrame(columns=expected_cols)
-        return pd.DataFrame(data)
+            return pd.DataFrame(columns=norm_expected)
+            
+        df = pd.DataFrame(data)
+        # Ustunlardagi har qanday o'zbekcha apostrof belgilarini standart "'" belgisiga o'tkazish
+        df.columns = df.columns.astype(str).str.replace("ʻ", "'").str.replace("’", "'").str.replace("`", "'")
+        return df
     except Exception as e:
-        return pd.DataFrame(columns=expected_cols)
+        norm_expected = [c.replace("ʻ", "'").replace("’", "'").replace("`", "'") for c in expected_cols]
+        return pd.DataFrame(columns=norm_expected)
 
 # Qator qo'shish funksiyasi
 def append_row(sheet_name, row_data):
@@ -67,7 +74,6 @@ with tab_dash:
     total_shartnoma = len(df_shartnomalar)
     
     # Komplektlar holati
-    # Sonlarni hisoblash
     try:
         yolda_soni = df_komplektlar[df_komplektlar["Hozirgi Joylashuv"].isin(["Koreya porti", "Xitoy porti", "Yoʻlda", "Bojxonada"])]["Komplektlar Soni"].astype(int).sum()
         ombor_soni = df_komplektlar[df_komplektlar["Hozirgi Joylashuv"] == "KD Omborda"]["Komplektlar Soni"].astype(int).sum()
@@ -75,9 +81,11 @@ with tab_dash:
         yolda_soni, ombor_soni = 0, 0
         
     try:
-        liniya_soni = df_ishlab_chiqarish["Yig'ilayotgan Soni"].astype(int).sum() - df_ishlab_chiqarish["Tayyor Bo'lgan Soni"].astype(int).sum()
-        tayyor_soni = df_ishlab_chiqarish["Tayyor Bo'lgan Soni"].astype(int).sum()
-    except:
+        # Liniyadagi = Jami yig'ilayotgan soni - Jami tayyor bo'lgan soni
+        yig_soni = df_ishlab_chiqarish["Yig'ilayotgan Soni"].astype(int).sum() if not df_ishlab_chiqarish.empty else 0
+        tayyor_soni = df_ishlab_chiqarish["Tayyor Bo'lgan Soni"].astype(int).sum() if not df_ishlab_chiqarish.empty else 0
+        liniya_soni = yig_soni - tayyor_soni
+    except Exception as e:
         liniya_soni, tayyor_soni = 0, 0
 
     # Metrikalar bloki
@@ -106,15 +114,17 @@ with tab_dash:
 
     with col_alerts:
         st.subheader("🚨 Kritik Holatlar")
-        # Kritik holat deb belgilangan yoki logistikada kechikayotganlar
-        kritik_df = df_komplektlar[df_komplektlar["Kritik Holat"] == "Ha"]
-        if not kritik_df.empty:
-            for idx, row in kritik_df.iterrows():
-                st.error(f"⚠️ **Konteyner:** {row['Konteyner / Partiya ID']} ({row['Model']} {row['Optsiya']}) \n\n"
-                         f"**Joylashuvi:** {row['Hozirgi Joylashuv']} | **Soni:** {row['Komplektlar Soni']} ta. \n\n"
-                         f"Tezkor ta'minot talab etiladi!")
+        if not df_komplektlar.empty:
+            kritik_df = df_komplektlar[df_komplektlar["Kritik Holat"] == "Ha"]
+            if not kritik_df.empty:
+                for idx, row in kritik_df.iterrows():
+                    st.error(f"⚠️ **Konteyner:** {row['Konteyner / Partiya ID']} ({row['Model']} {row['Optsiya']}) \n\n"
+                             f"**Joylashuvi:** {row['Hozirgi Joylashuv']} | **Soni:** {row['Komplektlar Soni']} ta. \n\n"
+                             f"Tezkor ta'minot talab etiladi!")
+            else:
+                st.success("Hozircha hech qanday kritik holat aniqlanmadi. Ta'minot zanjiri barqaror.")
         else:
-            st.success("Hozircha hech qanday kritik holat aniqlanmadi. Ta'minot zanjiri barqaror.")
+            st.success("Ma'lumotlar mavjud emas.")
 
 # ==================== TAB 2: IMPORT SHARTNOMALARI ====================
 with tab_shartnoma:
@@ -168,7 +178,6 @@ with tab_komplekt:
 
     with col_update:
         with st.expander("🔄 Konteyner Statusini Yangilash"):
-            # Statusni o'zgartirish formasi
             if not df_komplektlar.empty:
                 with st.form("status_update_form"):
                     selected_kont = st.selectbox("Konteynerni tanlang", df_komplektlar["Konteyner / Partiya ID"].tolist())
@@ -180,9 +189,7 @@ with tab_komplekt:
                         worksheet = sh.worksheet("Komplektlar")
                         cell = worksheet.find(selected_kont)
                         if cell:
-                            # Hozirgi joylashuv - 6-ustun (F)
                             worksheet.update_cell(cell.row, 6, new_loc)
-                            # Kritik holat - 8-ustun (H)
                             worksheet.update_cell(cell.row, 8, is_crit)
                             st.success(f"{selected_kont} statusi muvaffaqiyatli yangilandi!")
                         else:
@@ -214,10 +221,8 @@ with tab_ishlab:
                 submit_line = st.form_submit_button("Yig'ishni boshlash")
                 if submit_line:
                     if line_id and selected_kont_line != "Omborda yuk yo'q":
-                        # Ishlab chiqarishga qo'shish
                         append_row("Ishlab_Chiqarish", [line_id, selected_kont_line, l_model, l_opt, int(l_soni), str(l_date), 0, "Kutilmoqda"])
                         
-                        # Ombordan o'sha partiya statusini o'zgartirish (Avtomatik ravishda liniyaga o'tkazish)
                         worksheet_k = sh.worksheet("Komplektlar")
                         cell_k = worksheet_k.find(selected_kont_line)
                         if cell_k:
@@ -230,12 +235,13 @@ with tab_ishlab:
     with col_line_update:
         with st.expander("✅ Mashina Yig'ilishini Yakunlash (Tayyor Mahsulot)"):
             if not df_ishlab_chiqarish.empty:
+                # Ustun nomini xavfsiz qidirish
                 active_lines = df_ishlab_chiqarish[df_ishlab_chiqarish["Tayyor Bo'lgan Soni"].astype(int) == 0]["Liniya ID"].tolist()
                 
                 if active_lines:
                     with st.form("line_update_form"):
                         sel_line = st.selectbox("Yakunlanadigan Liniyani tanlang", active_lines)
-                        tayyor_soni = st.number_input("Yig'ilgan tayyor mashinalar soni", min_value=1, step=1)
+                        tayyor_soni_input = st.number_input("Yig'ilgan tayyor mashinalar soni", min_value=1, step=1)
                         tayyor_sana = st.date_input("Tayyor bo'lgan sana")
                         
                         submit_line_up = st.form_submit_button("Yig'ishni yakunlash")
@@ -243,9 +249,7 @@ with tab_ishlab:
                             worksheet_l = sh.worksheet("Ishlab_Chiqarish")
                             cell_l = worksheet_l.find(sel_line)
                             if cell_l:
-                                # Tayyor bo'lgan soni - 7-ustun (G)
-                                worksheet_l.update_cell(cell_l.row, 7, int(tayyor_soni))
-                                # Tayyor bo'lgan sana - 8-ustun (H)
+                                worksheet_l.update_cell(cell_l.row, 7, int(tayyor_soni_input))
                                 worksheet_l.update_cell(cell_l.row, 8, str(tayyor_sana))
                                 st.success(f"{sel_line} bo'yicha yig'ish yakunlandi!")
                             else:
