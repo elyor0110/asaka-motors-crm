@@ -25,12 +25,12 @@ except Exception as e:
     st.error(f"Google Sheets bilan bog'lanishda xatolik yuz berdi. Iltimos Secrets sozlamalarini tekshiring: {e}")
     st.stop()
 
-# Ustunlar nomlari (Standart apostrof bilan)
+# Ustunlar nomlari
 COLS_SHARTNOMALAR = ["Shartnoma ID", "Yetkazib beruvchi", "Sana", "Jami Summa", "Status"]
 COLS_KOMPLEKTLAR = ["Konteyner / Partiya ID", "Shartnoma ID", "Model", "Optsiya", "Komplektlar Soni", "Hozirgi Joylashuv", "ETA (Kelish sanasi)", "Kritik Holat"]
 COLS_ISHLAB_CHIQARISH = ["Liniya ID", "Konteyner / Partiya ID", "Model", "Optsiya", "Yig'ilayotgan Soni", "Liniyaga Chiqqan Sana", "Tayyor Bo'lgan Soni", "Tayyor Bo'lgan Sana"]
 
-# Ma'lumotlarni yuklash funksiyasi (Apostroflarni avtomatik tekislovchi)
+# Ma'lumotlarni yuklash funksiyasi
 def load_data(sheet_name, expected_cols):
     try:
         worksheet = sh.worksheet(sheet_name)
@@ -41,7 +41,6 @@ def load_data(sheet_name, expected_cols):
             return pd.DataFrame(columns=norm_expected)
             
         df = pd.DataFrame(data)
-        # Ustunlardagi har qanday o'zbekcha apostrof belgilarini standart "'" belgisiga o'tkazish
         df.columns = df.columns.astype(str).str.replace("ʻ", "'").str.replace("’", "'").str.replace("`", "'")
         return df
     except Exception as e:
@@ -70,22 +69,37 @@ tab_dash, tab_shartnoma, tab_komplekt, tab_ishlab = st.tabs([
 with tab_dash:
     st.header("Tezkor Ko'rsatkichlar")
     
-    # Umumiy hisob-kitoblar
     total_shartnoma = len(df_shartnomalar)
     
-    # Komplektlar holati
+    # 1. Yo'ldagi komplektlar (Tranzit)
     try:
         yolda_soni = df_komplektlar[df_komplektlar["Hozirgi Joylashuv"].isin(["Koreya porti", "Xitoy porti", "Yoʻlda", "Bojxonada"])]["Komplektlar Soni"].astype(int).sum()
-        ombor_soni = df_komplektlar[df_komplektlar["Hozirgi Joylashuv"] == "KD Omborda"]["Komplektlar Soni"].astype(int).sum()
     except:
-        yolda_soni, ombor_soni = 0, 0
+        yolda_soni = 0
         
+    # 2. KD Ombordagi haqiqiy qoldiqni matematik hisoblash (Jami kelgan - Liniyaga chiqqan)
+    ombor_soni = 0
+    if not df_komplektlar.empty:
+        arrived_containers = df_komplektlar[df_komplektlar["Hozirgi Joylashuv"].isin(["KD Omborda", "Ishlab chiqarish liniyasida"])]
+        for idx, row in arrived_containers.iterrows():
+            cont_id = row["Konteyner / Partiya ID"]
+            orig_qty = int(row["Komplektlar Soni"])
+            
+            # Ushbu konteynerdan jami liniyaga chiqqanini aniqlash
+            sent_qty = 0
+            if not df_ishlab_chiqarish.empty:
+                sent_qty = df_ishlab_chiqarish[df_ishlab_chiqarish["Konteyner / Partiya ID"] == cont_id]["Yig'ilayotgan Soni"].astype(int).sum()
+            
+            rem_qty = orig_qty - sent_qty
+            if rem_qty > 0:
+                ombor_soni += rem_qty
+        
+    # 3. Liniyadagi (Yig'ishda) va Tayyor bo'lganlar
     try:
-        # Liniyadagi = Jami yig'ilayotgan soni - Jami tayyor bo'lgan soni
         yig_soni = df_ishlab_chiqarish["Yig'ilayotgan Soni"].astype(int).sum() if not df_ishlab_chiqarish.empty else 0
         tayyor_soni = df_ishlab_chiqarish["Tayyor Bo'lgan Soni"].astype(int).sum() if not df_ishlab_chiqarish.empty else 0
         liniya_soni = yig_soni - tayyor_soni
-    except Exception as e:
+    except:
         liniya_soni, tayyor_soni = 0, 0
 
     # Metrikalar bloki
@@ -205,43 +219,73 @@ with tab_ishlab:
     col_line_add, col_line_update = st.columns(2)
 
     with col_line_add:
+        # Tanlangan konteynerda qancha qoldiq borligini aniqlash
+        kont_list = []
+        if not df_komplektlar.empty:
+            # KD Omborda yoki allaqachon liniyaga chiqqan lekin qoldig'i bor konteynerlar
+            for idx, row in df_komplektlar[df_komplektlar["Hozirgi Joylashuv"].isin(["KD Omborda", "Ishlab chiqarish liniyasida"])].iterrows():
+                cid = row["Konteyner / Partiya ID"]
+                tot = int(row["Komplektlar Soni"])
+                sent = df_ishlab_chiqarish[df_ishlab_chiqarish["Konteyner / Partiya ID"] == cid]["Yig'ilayotgan Soni"].astype(int).sum() if not df_ishlab_chiqarish.empty else 0
+                if tot - sent > 0:
+                    kont_list.append(cid)
+
         with st.expander("🏭 Komplektlarni Liniyaga chiqarish (Yig'ishni boshlash)"):
-            with st.form("line_add_form", clear_on_submit=True):
-                line_id = st.text_input("Liniya ID (Masalan: LINE-2026-001)")
-                kont_list = df_komplektlar[df_komplektlar["Hozirgi Joylashuv"] == "KD Omborda"]["Konteyner / Partiya ID"].tolist() if not df_komplektlar.empty else []
-                if not kont_list:
-                    st.warning("Eslatma: KD Omborda yig'ishga tayyor komplektlar mavjud emas.")
-                
-                selected_kont_line = st.selectbox("Qaysi partiyadan olinadi?", kont_list if kont_list else ["Omborda yuk yo'q"])
-                l_model = st.text_input("Model (Masalan: Onix)")
-                l_opt = st.text_input("Optsiya (Masalan: Premier)")
-                l_soni = st.number_input("Yig'ishga topshirilayotgan soni", min_value=1, step=1)
-                l_date = st.date_input("Liniyaga chiqqan sana")
-                
-                submit_line = st.form_submit_button("Yig'ishni boshlash")
-                if submit_line:
-                    if line_id and selected_kont_line != "Omborda yuk yo'q":
-                        append_row("Ishlab_Chiqarish", [line_id, selected_kont_line, l_model, l_opt, int(l_soni), str(l_date), 0, "Kutilmoqda"])
-                        
-                        worksheet_k = sh.worksheet("Komplektlar")
-                        cell_k = worksheet_k.find(selected_kont_line)
-                        if cell_k:
-                            worksheet_k.update_cell(cell_k.row, 6, "Ishlab chiqarish liniyasida")
+            if kont_list:
+                with st.form("line_add_form", clear_on_submit=True):
+                    line_id = st.text_input("Liniya ID (Masalan: LINE-2026-001)")
+                    selected_kont_line = st.selectbox("Qaysi partiyadan olinadi?", kont_list)
+                    
+                    # Tanlangan konteyner qoldig'ini hisoblash va limit qo'yish
+                    row_k = df_komplektlar[df_komplektlar["Konteyner / Partiya ID"] == selected_kont_line].iloc[0]
+                    orig_qty = int(row_k["Komplektlar Soni"])
+                    already_sent = df_ishlab_chiqarish[df_ishlab_chiqarish["Konteyner / Partiya ID"] == selected_kont_line]["Yig'ilayotgan Soni"].astype(int).sum() if not df_ishlab_chiqarish.empty else 0
+                    max_allowed = orig_qty - already_sent
+                    
+                    st.info(f"Ushbu konteynerda jami {orig_qty} ta komplekt bor edi. Ombordagi qoldiq: {max_allowed} ta.")
+                    
+                    l_model = st.text_input("Model", value=row_k["Model"])
+                    l_opt = st.text_input("Optsiya", value=row_k["Optsiya"])
+                    l_soni = st.number_input("Yig'ishga topshirilayotgan soni", min_value=1, max_value=max_allowed, step=1)
+                    l_date = st.date_input("Liniyaga chiqqan sana")
+                    
+                    submit_line = st.form_submit_button("Yig'ishni boshlash")
+                    if submit_line:
+                        if line_id:
+                            # 1. Ishlab chiqarish varog'iga qo'shish
+                            append_row("Ishlab_Chiqarish", [line_id, selected_kont_line, l_model, l_opt, int(l_soni), str(l_date), 0, "Kutilmoqda"])
                             
-                        st.success("Komplektlar liniyaga muvaffaqiyatli yo'naltirildi!")
-                    else:
-                        st.error("Ma'lumotlar to'liq emas.")
+                            # 2. Komplektlar statusini yangilash
+                            worksheet_k = sh.worksheet("Komplektlar")
+                            cell_k = worksheet_k.find(selected_kont_line)
+                            if cell_k:
+                                if (already_sent + int(l_soni)) >= orig_qty:
+                                    # Agar hammasi liniyaga chiqqan bo'lsa, statusni o'zgartiramiz
+                                    worksheet_k.update_cell(cell_k.row, 6, "Ishlab chiqarish liniyasida")
+                                else:
+                                    # Qoldiq qolgan bo'lsa, status KD Omborda bo'lib qoladi
+                                    worksheet_k.update_cell(cell_k.row, 6, "KD Omborda")
+                                    
+                            st.success("Komplektlar liniyaga muvaffaqiyatli yo'naltirildi! Sahifani yangilang.")
+                        else:
+                            st.error("Liniya ID kiritilishi shart.")
+            else:
+                st.warning("Eslatma: KD Omborda yig'ishga tayyor yangi komplektlar mavjud emas.")
 
     with col_line_update:
         with st.expander("✅ Mashina Yig'ilishini Yakunlash (Tayyor Mahsulot)"):
             if not df_ishlab_chiqarish.empty:
-                # Ustun nomini xavfsiz qidirish
                 active_lines = df_ishlab_chiqarish[df_ishlab_chiqarish["Tayyor Bo'lgan Soni"].astype(int) == 0]["Liniya ID"].tolist()
                 
                 if active_lines:
                     with st.form("line_update_form"):
                         sel_line = st.selectbox("Yakunlanadigan Liniyani tanlang", active_lines)
-                        tayyor_soni_input = st.number_input("Yig'ilgan tayyor mashinalar soni", min_value=1, step=1)
+                        
+                        # Tanlangan liniyadagi yig'ilayotgan mashinalar sonini aniqlash
+                        row_l = df_ishlab_chiqarish[df_ishlab_chiqarish["Liniya ID"] == sel_line].iloc[0]
+                        line_limit = int(row_l["Yig'ilayotgan Soni"])
+                        
+                        tayyor_soni_input = st.number_input("Yig'ilgan tayyor mashinalar soni", min_value=1, max_value=line_limit, step=1)
                         tayyor_sana = st.date_input("Tayyor bo'lgan sana")
                         
                         submit_line_up = st.form_submit_button("Yig'ishni yakunlash")
@@ -251,7 +295,7 @@ with tab_ishlab:
                             if cell_l:
                                 worksheet_l.update_cell(cell_l.row, 7, int(tayyor_soni_input))
                                 worksheet_l.update_cell(cell_l.row, 8, str(tayyor_sana))
-                                st.success(f"{sel_line} bo'yicha yig'ish yakunlandi!")
+                                st.success(f"{sel_line} bo'yicha yig'ish yakunlandi! Sahifani yangilang.")
                             else:
                                 st.error("Liniya topilmadi.")
                 else:
